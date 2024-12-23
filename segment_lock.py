@@ -7,7 +7,7 @@ from django.forms.models import model_to_dict
 from redis.exceptions import RedisError
 
 
-class UserService:
+class BookService:
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
 
@@ -24,14 +24,29 @@ class UserService:
         except RedisError:
             return False
 
-    def _release_segment_lock(self, lock_key: str) -> None:
-        """释放分段锁"""
-        try:
-            self.redis.delete(lock_key)
-        except RedisError:
-            logging.error(f"Failed to release lock {lock_key}")
+    def _release_segment_lock(self, lock_key: str, lock_value: str) -> bool:
+        """
+        释放分段锁，确保是原子操作
+        :param lock_key: 锁的键
+        :param lock_value: 锁的值（唯一标识）
+        :return: 是否成功释放锁
+        """
 
-    def get_bookss(self, query: str, by: str, num_segments: int = 10) -> List[Books]:
+    release_lock_script = """
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+        return redis.call("del", KEYS[1])
+    else
+        return 0
+    end
+    """
+    try:
+        result = self.redis.eval(release_lock_script, 1, lock_key, lock_value)
+        return result == 1
+    except redis.exceptions.RedisError as e:
+        logging.error(f"Failed to release lock {lock_key}: {str(e)}")
+        return False
+
+    def get_books(self, query: str, by: str, num_segments: int = 10) -> List[Books]:
         """使用分段锁"""
         ...
         if new_books:
@@ -68,6 +83,5 @@ class UserService:
             new_books = Book.objects.filter(**{field: query})
             return list(new_books)
         else:
-            # 如果没有找到用户，删除记录
             Book.objects.filter(**{field: query}).delete()
             return new_books
